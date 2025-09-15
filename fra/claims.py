@@ -210,8 +210,13 @@ def parcels_geojson():
             "id": str(c["_id"]),
             "status": c.get("status"),
             "claimant_name": c.get("claimant_name"),
+            "village": c.get("village"),
+            "khesra_number": c.get("khesra_number"),
+            "land_area": c.get("land_area"),
+            "suggested_schemes": c.get("suggested_schemes", []),
             "document_url": url_for("claims.serve_document", filename=c.get("document_path"), _external=True) if c.get("document_path") else None
-        }
+            }
+
         features.append({
             "type": "Feature",
             "geometry": {"type": "Point", "coordinates": [lon, lat]},
