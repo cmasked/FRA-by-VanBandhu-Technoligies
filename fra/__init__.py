@@ -3,9 +3,20 @@ import os
 from flask import Flask
 from flask_pymongo import PyMongo
 
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 app = Flask(__name__)
+# fra/__init__.py
+...
+app.config["SECRET_KEY"] = "b9b0819737284368802be9e7b22ee167"
+app.config["GOOGLE_APPLICATION_CREDENTIALS"] = r"D:\FRA\..."
+
+# ADD YOUR NEW KEY HERE
+app.config["FAST2SMS_API_KEY"] = "zz29gQotqKiCpYZa91JssrztUVqUFkSvECIGfsGZJPOxMKi5vohGLAQxC0rd"
+
+
+...
 
 # Config from environment (fallbacks for local dev)
 app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "dev-secret")

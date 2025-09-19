@@ -1,1 +1,8 @@
 venv/
+# .gitignore
+
+# Environment variables
+.env
+
+# Google Cloud credentials
+*.json

@@ -62,6 +62,7 @@ def run_local_ocr_on_pdf(path, poppler_path=None):
         return ""
     return pytesseract.image_to_string(images[0])
 
+
 def extract_fields_from_text(text):
     """Simple heuristics to extract claimant name, village, land_area, coords."""
     out = {"claimant_name": None, "village": None, "land_area": None, "land_coordinates": None}

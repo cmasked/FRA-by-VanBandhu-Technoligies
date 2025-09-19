@@ -1,4 +1,6 @@
 # fra/claims.py
+import re
+from flask import url_for
 import os, requests
 from flask import Blueprint, request, jsonify, current_app, send_from_directory, url_for
 from bson import ObjectId
@@ -112,17 +114,32 @@ def upload_and_process_claim():
 # ----------------------
 @claims_bp.route("/claimsList", methods=["GET"])
 @require_api_key
-def list_claims():
+def claims_list():
+    """Return claims for dashboard list view"""
     docs = []
     for c in db.claims.find().sort("_id", -1):
+        # build safe doc URL
+        doc_url = None
+        if c.get("document_path"):
+            if c["document_path"].startswith(("http://", "https://")):
+                doc_url = c["document_path"]
+            else:
+                try:
+                    doc_url = url_for("claims.serve_document",
+                                      filename=c["document_path"],
+                                      _external=True)
+                except Exception:
+                    doc_url = None
+
         docs.append({
             "id": str(c["_id"]),
-            "claimant_name": c.get("claimant_name"),
+            "claimant_name": c.get("claimant_name") or "Unknown",
+            "status": c.get("status") or "Waiting",
             "village": c.get("village"),
             "land_area": c.get("land_area"),
-            "status": c.get("status"),
-            "document_url": url_for("claims.serve_document", filename=c.get("document_path"), _external=True) if c.get("document_path") else None
+            "document_url": doc_url,
         })
+
     return jsonify(docs), 200
 
 
@@ -137,8 +154,13 @@ def get_claim(id):
         return jsonify({"error": "not_found"}), 404
     c["id"] = str(c["_id"])
     c.pop("_id", None)
+
     if c.get("document_path"):
-        c["document_url"] = url_for("claims.serve_document", filename=c["document_path"], _external=True)
+        if c["document_path"].startswith("http"):
+            c["document_url"] = c["document_path"]
+        else:
+            c["document_url"] = url_for("claims.serve_document", filename=c["document_path"], _external=True)
+
     return jsonify(c), 200
 
 
@@ -162,64 +184,76 @@ def update_status(id):
 
     # Notify claimant (via messaging service if configured)
     messaging_url = current_app.config.get("MESSAGING_SERVICE_URL")
+   # --- ADD THIS NEW FAST2SMS BLOCK ---
     try:
+        # 1. Get the claim details from the database
         claim = db.claims.find_one({"_id": ObjectId(id)})
-        contact = claim.get("contact_phone")  # <-- phone used here
-        if messaging_url and contact:
-            requests.post(f"{messaging_url}/send", json={
-                "to": contact,
-                "message": f"Your FRA claim {id} status changed to {new_status}"
-            }, timeout=3)
-    except Exception:
-        pass
+        contact_number = claim.get("contact_phone") # This is the number from your OCR
+        schemes = claim.get("suggested_schemes", [])
+        
+        # Build a nice message
+        schemes_text = ", ".join(schemes) if schemes else "No specific schemes suggested."
+        sms_message = f"Your FRA claim ({id}) has been updated to: {new_status}. Suggested Schemes: {schemes_text}"
 
+        # 2. Send the SMS if we have a contact number
+        if contact_number:
+            sms_url = "https://www.fast2sms.com/dev/bulkV2"
+            sms_headers = {
+                # Get the key safely from the app config
+                "authorization": current_app.config["FAST2SMS_API_KEY"], 
+                "Content-Type": "application/json"
+            }
+            sms_payload = {
+                "route": "q",
+                "message": sms_message,     # Send our dynamic message
+                "language": "english",
+                "numbers": 9599457174   # Send to the number from the database
+            }
+            
+            # 3. Send the request to Fast2SMS
+            response = requests.post(sms_url, headers=sms_headers, json=sms_payload)
+            print(f"SMS Notification Sent to {contact_number}. Status: {response.status_code}, Response: {response.text}")
+
+    except Exception as e:
+        # If SMS fails, just print the error and continue.
+        # Don't crash the whole API request.
+        print(f"CRITICAL: SMS notification failed. Error: {e}")
+        pass 
+
+    # Finally, return the success message to the officer's browser
     return jsonify({"message": f"Claim {id} updated to {new_status}"}), 200
 
 
 # ----------------------
 # Serve uploaded document file
 # ----------------------
-@claims_bp.route("/uploads/<filename>", methods=["GET"])
-@require_api_key
-def serve_document(filename):
-    upload_folder = current_app.config["UPLOAD_FOLDER"]
-    return send_from_directory(upload_folder, filename, as_attachment=False)
-
-
-# ----------------------
-# GeoJSON parcels endpoint (for map)
-# ----------------------
 @claims_bp.route("/parcels", methods=["GET"])
 @require_api_key
-def parcels_geojson():
+def parcels():
+    """Return claims as GeoJSON for FRAAtlas map"""
     features = []
-    for c in db.claims.find():
-        coords = c.get("land_coordinates")
-        if not coords:
+    for c in db.claims.find({"land_coordinates": {"$exists": True}}):
+        try:
+            lon, lat = [float(x.strip()) for x in c["land_coordinates"].split(",")]
+        except Exception:
             continue
-        if isinstance(coords, str):
-            try:
-                lat, lon = map(float, coords.split(","))
-            except Exception:
-                continue
-        elif isinstance(coords, (list, tuple)) and len(coords) >= 2:
-            lat, lon = float(coords[0]), float(coords[1])
-        else:
-            continue
-        properties = {
-            "id": str(c["_id"]),
-            "status": c.get("status"),
-            "claimant_name": c.get("claimant_name"),
-            "village": c.get("village"),
-            "khesra_number": c.get("khesra_number"),
-            "land_area": c.get("land_area"),
-            "suggested_schemes": c.get("suggested_schemes", []),
-            "document_url": url_for("claims.serve_document", filename=c.get("document_path"), _external=True) if c.get("document_path") else None
-            }
 
         features.append({
             "type": "Feature",
             "geometry": {"type": "Point", "coordinates": [lon, lat]},
-            "properties": properties
+            "properties": {
+                "id": str(c["_id"]),
+                "claimant_name": c.get("claimant_name") or "Unknown",
+                "status": c.get("status") or "Waiting",
+                "village": c.get("village"),
+                "khesra_number": c.get("khesra_number"),
+                "land_area": c.get("land_area"),
+                "suggested_schemes": c.get("suggested_schemes", []),
+                "document_url": c.get("document_path"),
+            }
         })
-    return jsonify({"type": "FeatureCollection", "features": features}), 200
+
+    return jsonify({
+        "type": "FeatureCollection",
+        "features": features
+    }), 200
