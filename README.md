@@ -1,7 +1,7 @@
 
   # Government Website Design
 
-  This is a code bundle for Government Website Design. The original project is available at https://www.figma.com/design/fji4UEPWIASyBT1l97XcFV/Government-Website-Design.
+  
 
   ## Running the code
 
