@@ -1,0 +1,317 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>FRA Parcels Map</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <!-- Leaflet CSS -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <style>
+    body { margin:0; padding:0; font-family: Arial, sans-serif; }
+    #app { display: flex; height: 100vh; }
+    #map { flex: 1; }
+    #panel {
+      width: 360px;
+      border-left: 1px solid #ddd;
+      padding: 12px;
+      box-sizing: border-box;
+      overflow-y: auto;
+      background: #fafafa;
+    }
+    .legend-item { display:flex; align-items:center; margin:6px 0;}
+    .legend-swatch { width:18px; height:18px; margin-right:8px; border-radius:4px; }
+    .action-btn { display:inline-block; margin:4px; padding:6px 10px; cursor:pointer; border-radius:4px; border:0; }
+    .btn-approve { background:#28a745; color:white; }
+    .btn-reject { background:#dc3545; color:white; }
+    .btn-sendback { background:#17a2b8; color:white; }
+    .claim-field { margin-bottom:8px; }
+    .claim-field b{display:block;font-size:13px;color:#333}
+    .claim-field span{color:#555}
+  </style>
+</head>
+<body>
+  <div id="app">
+    <div id="map"></div>
+    <div id="panel">
+      <h3>Parcel / Claim Details</h3>
+      <div id="panelContent">Click a parcel on the map to see details here.</div>
+      <hr>
+      <h4>Legend</h4>
+      <div id="legend"></div>
+    </div>
+  </div>
+
+  <!-- Leaflet JS -->
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <script>
+  // ==== CONFIG (replace these) ====
+  const BASE_URL = "http://127.0.0.1:5000";   // your backend base
+  const API_KEY = "{{b9b0819737284368802be9e7b22ee167}}";             // set this via template or replace with actual key for testing
+  // Note: For demo & hackathon it's OK to put API_KEY in client; for production use a server-side proxy.
+  // ================================
+
+  // status -> color map
+  const STATUS_COLORS = {
+    "Approved": "#28a745",
+    "Waiting":  "#ffb020", // amber
+    "Rejected": "#dc3545",
+    "SendBack": "#17a2b8",
+    "default":  "#6c757d"
+  };
+
+  // Create map
+  const map = L.map('map').setView([23.0, 77.0], 6);
+
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 19,
+    attribution: '&copy; OpenStreetMap'
+  }).addTo(map);
+
+  // layers and index
+  const parcelsLayer = L.geoJSON(null, {
+    style: styleFeature,
+    pointToLayer: function(feature, latlng) {
+      // render Point as circle marker
+      return L.circleMarker(latlng, pointStyle(feature));
+    },
+    onEachFeature: onEachFeature
+  }).addTo(map);
+
+  // store map layer by claim id for quick updates
+  const layerById = {};
+
+  // legend
+  const legendEl = document.getElementById('legend');
+  for (const s of ["Approved","Waiting","Rejected","SendBack"]) {
+    const d = document.createElement('div'); d.className='legend-item';
+    const sw = document.createElement('div'); sw.className='legend-swatch';
+    sw.style.background = STATUS_COLORS[s] || STATUS_COLORS.default;
+    d.appendChild(sw);
+    const txt = document.createElement('div'); txt.innerText = s;
+    d.appendChild(txt);
+    legendEl.appendChild(d);
+  }
+
+  // helper: choose color from status
+  function colorForStatus(status) {
+    return STATUS_COLORS[status] || STATUS_COLORS.default;
+  }
+
+  // style for polygon / lines
+  function styleFeature(feature) {
+    const status = (feature.properties && feature.properties.status) || 'default';
+    return {
+      color: colorForStatus(status),
+      weight: 2,
+      fillColor: colorForStatus(status),
+      fillOpacity: 0.35
+    };
+  }
+
+  // style for point markers
+  function pointStyle(feature) {
+    const status = (feature.properties && feature.properties.status) || 'default';
+    return {
+      radius: 8,
+      fillColor: colorForStatus(status),
+      color: colorForStatus(status),
+      weight: 1,
+      opacity: 1,
+      fillOpacity: 0.9
+    };
+  }
+
+  // handle each feature (popup & click)
+  function onEachFeature(feature, layer) {
+    // save mapping
+    if (feature.properties && feature.properties.id) {
+      layerById[feature.properties.id] = layer;
+    }
+
+    // Build popup HTML (brief)
+    const p = feature.properties || {};
+    let title = `<strong>${escapeHtml(p.claimant_name || "Unknown")}</strong><br>`;
+    title += `<small>Status: ${escapeHtml(p.status || 'N/A')}</small><br>`;
+    if (p.khesra_number) title += `<small>Khesra: ${escapeHtml(p.khesra_number)}</small><br>`;
+
+    // link to document_url if present
+    if (p.document_url) {
+      title += `<a href="${escapeAttr(p.document_url)}" target="_blank">View document</a><br>`;
+    }
+
+    // Add inline action buttons to popup
+    title += `<div style="margin-top:6px;">
+      <button class="action-btn btn-approve" onclick="window._mapActionApprove('${p.id}')">Approve</button>
+      <button class="action-btn btn-reject" onclick="window._mapActionReject('${p.id}')">Reject</button>
+      <button class="action-btn btn-sendback" onclick="window._mapActionSendBack('${p.id}')">SendBack</button>
+    </div>`;
+
+    layer.bindPopup(title);
+
+    // click behavior: also fill the side panel
+    layer.on('click', function(e) {
+      showInPanel(feature);
+    });
+  }
+
+  // helpers to escape
+  function escapeHtml(str) {
+    if (!str) return '';
+    return String(str).replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+  }
+  function escapeAttr(s) { return escapeHtml(s); }
+
+  // Show details in the right-hand panel
+  function showInPanel(feature) {
+    const p = feature.properties || {};
+    const el = document.getElementById('panelContent');
+    el.innerHTML = `
+      <div class="claim-field"><b>Name</b><span>${escapeHtml(p.claimant_name||'')}</span></div>
+      <div class="claim-field"><b>Status</b><span id="panel-status">${escapeHtml(p.status||'')}</span></div>
+      <div class="claim-field"><b>Village</b><span>${escapeHtml(p.village||'')}</span></div>
+      <div class="claim-field"><b>Khesra</b><span>${escapeHtml(p.khesra_number||'')}</span></div>
+      <div class="claim-field"><b>Area</b><span>${escapeHtml(p.land_area||'')}</span></div>
+      <div class="claim-field"><b>Suggested Schemes</b><span>${(p.suggested_schemes||[]).join(', ')}</span></div>
+      <div class="claim-field"><b>Evidence</b><span>${escapeHtml(p.evidence||'')}</span></div>
+      <div style="margin-top:10px;">
+        <button class="action-btn btn-approve" onclick="window._mapActionApprove('${p.id}')">Approve</button>
+        <button class="action-btn btn-reject" onclick="window._mapActionReject('${p.id}')">Reject</button>
+        <button class="action-btn btn-sendback" onclick="window._mapActionSendBack('${p.id}')">SendBack</button>
+      </div>
+    `;
+  }
+
+  // ---- Map action handlers exposed globally for popup inline onclick ----
+  window._mapActionApprove = (id) => updateStatusFromMap(id, 'Approved', 'Approved via map');
+  window._mapActionReject = (id)  => updateStatusFromMap(id, 'Rejected', 'Rejected via map');
+  window._mapActionSendBack = (id) => updateStatusFromMap(id, 'SendBack', 'Sent back for more docs');
+
+  async function updateStatusFromMap(claimId, newStatus, remark) {
+    if (!confirm(`Change claim ${claimId} --> ${newStatus}?`)) return;
+    try {
+      const resp = await fetch(`${BASE_URL}/claims/${claimId}/update_status`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `ApiKey ${API_KEY}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ status: newStatus, remarks: remark })
+      });
+      const j = await resp.json();
+      if (!resp.ok) throw new Error(JSON.stringify(j));
+      // update UI: update feature.properties and style
+      const layer = layerById[claimId];
+      if (!layer) { alert('Layer not found on map (it may be in a different page view).'); return; }
+
+      // update the underlying feature's properties (if stored)
+      const feature = layer.feature;
+      feature.properties.status = newStatus;
+
+      // update style (works for polygon and circleMarker)
+      if (layer.setStyle) {
+        layer.setStyle(styleFeature(feature));
+        if (layer.setRadius) { // circleMarker may need radius set
+          layer.setStyle(pointStyle(feature));
+        }
+      } else {
+        // fallback: remove & re-add
+        parcelsLayer.removeLayer(layer);
+        parcelsLayer.addData(feature);
+      }
+
+      // update popup & panel (rebind small popup)
+      layer.bindPopup(`<strong>${escapeHtml(feature.properties.claimant_name||'')}</strong><br>Status: ${escapeHtml(newStatus)}`);
+      // update panel status text if open
+      const panelStatus = document.getElementById('panel-status');
+      if (panelStatus) panelStatus.innerText = newStatus;
+
+      alert(j.message || 'Updated');
+    } catch (err) {
+      console.error('Update error', err);
+      alert('Failed to update status: ' + err.message);
+    }
+  }
+
+  // ---- Fetch GeoJSON from backend and add to map ----
+  async function loadParcelsFromServer() {
+    try {
+      const res = await fetch(`${BASE_URL}/parcels`, {
+        headers: { 'Authorization': `ApiKey ${API_KEY}` }
+      });
+      if (!res.ok) {
+        const txt = await res.text();
+        throw new Error('Fetch failed: ' + res.status + ' — ' + txt);
+      }
+      const geojson = await res.json();
+
+      // Optional normalization: some backends (or bad OCR) sometimes store coords as [lat, lon] rather than [lon, lat].
+      // L.geoJSON expects GeoJSON (lon,lat order). We'll run a small heuristic to detect & fix suspect points.
+      normalizeGeoJSONCoordinates(geojson);
+
+      parcelsLayer.addData(geojson);
+
+      // fit map to data bounds (if any)
+      try {
+        const bounds = parcelsLayer.getBounds();
+        if (bounds.isValid()) map.fitBounds(bounds.pad(0.2));
+      } catch(e) { /* ignore */ }
+
+    } catch (e) {
+      console.error('Failed to load parcels', e);
+      alert('Failed to load parcels: ' + e.message);
+    }
+  }
+
+  // Heuristic normalization: convert [lat,lon] → [lon,lat] when it clearly looks swapped.
+  function normalizeGeoJSONCoordinates(geojson) {
+    if (!geojson || !geojson.features) return;
+    for (const f of geojson.features) {
+      if (!f.geometry) continue;
+      if (f.geometry.type === 'Point') {
+        const c = f.geometry.coordinates;
+        if (!Array.isArray(c) || c.length < 2) continue;
+        const a = Number(c[0]), b = Number(c[1]);
+        // If first coord is within lat-range and second is outside latitude range, it's probably [lat,lon] and should be swapped.
+        // lat range ≈ -90..90, lon range ≈ -180..180
+        if (Math.abs(a) <= 90 && Math.abs(b) > 90) {
+          // swap to [lon,lat]
+          f.geometry.coordinates = [b, a];
+        }
+        // If both are within lat-range (e.g. India: 23 and 76), it's ambiguous; our backend should be consistent.
+      } else if (f.geometry.type === 'Polygon' || f.geometry.type === 'MultiPolygon') {
+        // assume polygon coords are already valid GeoJSON [lon,lat]; if you see rendering in wrong place, inspect DB
+      }
+    }
+  }
+
+  // ---- quick test with inline sample if you want to debug without the backend: ----
+  const sampleGeoJSON = {
+    "type":"FeatureCollection",
+    "features":[
+      {
+        "type":"Feature",
+        "geometry":{"type":"Point","coordinates":[76.54,23.45]},
+        "properties":{"id":"TEST1","status":"Waiting","claimant_name":"Raju","document_url":null,"khesra_number":"KH-100"}
+      },
+      {
+        "type":"Feature",
+        "geometry":{"type":"Polygon","coordinates":[[[76.50,23.44],[76.56,23.44],[76.56,23.48],[76.50,23.48],[76.50,23.44]]]},
+        "properties":{"id":"TEST2","status":"Approved","claimant_name":"Demo Parcel","document_url":null}
+      }
+    ]
+  };
+  // Uncomment to test offline:
+  // normalizeGeoJSONCoordinates(sampleGeoJSON); parcelsLayer.addData(sampleGeoJSON); map.fitBounds(parcelsLayer.getBounds().pad(0.2));
+
+  // finally load from your backend
+  loadParcelsFromServer();
+
+  // ===== CORS NOTE =====
+  // If your frontend is served from a different origin than the Flask backend,
+  // enable CORS on Flask side (pip install flask-cors; then in run.py: from flask_cors import CORS; CORS(app))
+  // Otherwise fetch to /parcels will be blocked by browser.
+
+  </script>
+</body>
+</html>
